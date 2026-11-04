@@ -8,6 +8,8 @@
 
 [Documentation](https://samox73.github.io/jotter/) · [Install](https://samox73.github.io/jotter/getting-started/installation/) · [Keybindings](https://samox73.github.io/jotter/reference/keybindings/) · [Changelog](https://github.com/samox73/jotter/blob/main/CHANGELOG.md)
 
+<a title="jOtter is a Terminal Trove Tool of the Week" href="https://terminaltrove.com/jotter/"><img src="https://cdn.terminaltrove.com/media/badges/tool_of_the_week/svg/terminal_trove_tool_of_the_week_gold_transparent.svg" alt="Terminal Trove Tool of the Week" width="220"/></a>
+
 </div>
 
 Open, edit and run real `.ipynb` notebooks in your terminal, with vim keys, inline plots and rendered LaTeX, and keystroke latency so low that holding a key is a non-event.

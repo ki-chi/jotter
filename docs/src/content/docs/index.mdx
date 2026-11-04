@@ -24,6 +24,8 @@ hero:
 import { Card, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
 import Clip from '../../components/Clip.astro';
 
+<p align="center"><a title="jOtter is a Terminal Trove Tool of the Week" href="https://terminaltrove.com/jotter/"><img src="https://cdn.terminaltrove.com/media/badges/tool_of_the_week/svg/terminal_trove_tool_of_the_week_gold_transparent.svg" alt="Terminal Trove Tool of the Week" width="220"/></a></p>
+
 <Clip name="hero" alt="A terminal: jotter opens a notebook and runs it top to bottom, showing a markdown cell with a rendered equation, code cells with their output, and an inline plot of a damped oscillation" />
 
 ## Why jOtter
@@ -33,7 +35,7 @@ import Clip from '../../components/Clip.astro';
     Opens and saves `.ipynb` losslessly. Cell ids, metadata and fields written by other tools survive the round trip, so collaborators on JupyterLab never notice.
   </Card>
   <Card title="Fast" icon="rocket">
-    Redraws take single-digit microseconds. Cells are rendered once and cached, so holding a key down is a non-event, even in long notebooks full of plots.
+    Redraws take well under a millisecond. Cells are rendered once and cached, so holding a key down is a non-event, even in long notebooks full of plots.
   </Card>
   <Card title="Vim keys everywhere" icon="pencil">
     Move between cells with `j`/`k`, edit with a modal editor, or let an embedded Neovim with your own config drive cell editing.

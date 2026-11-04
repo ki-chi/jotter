@@ -28,7 +28,7 @@ One `tokio::select!` loop waits on terminal events (keys, mouse, resize, focus),
 
 ## Rendering
 
-Drawing has to be fast enough that holding a key down never lags. The expensive work (syntax highlighting, markdown, math, decoding and scaling images, wrapping) happens once per cell and is cached. It's redone only for the cell that changed, or for everything when the terminal's width or font size changes. Each frame then draws only the visible rows from the cache, which takes microseconds.
+Drawing has to be fast enough that holding a key down never lags. The expensive work (syntax highlighting, markdown, math, decoding and scaling images, wrapping) happens once per cell and is cached. It's redone only for the cell that changed, or for everything when the terminal's width or font size changes. Each frame then draws only the visible rows from the cache, which takes well under a millisecond.
 
 ## Notebook model
 
