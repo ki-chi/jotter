@@ -59,6 +59,13 @@ fn keybindings() -> String {
             let _ = writeln!(s, "| {} | {what} |", chords(keys));
         }
     }
+    s += "\n## Emacs keymap\n\nSet `keymap = \"emacs\"`. Notebook cell shortcuts remain available; the following sections describe Emacs bindings. Neovim retains its own editing keys. `C-` means Ctrl, `M-` means Alt; `(then)` denotes a sequence. Ctrl+Space may arrive as Ctrl+@. Esc followed by a character is not supported as Meta.\n";
+    for (section, rows) in crate::ui::EMACS_HELP {
+        let _ = write!(s, "\n### {section}\n\n| Keys | Action |\n| --- | --- |\n");
+        for (keys, what) in *rows {
+            let _ = writeln!(s, "| {} | {what} |", chords(keys));
+        }
+    }
     s
 }
 
@@ -103,7 +110,7 @@ fn configuration() -> String {
     for (name, ty, doc) in config_fields() {
         let ty = match ty {
             "bool" => "boolean",
-            "String" => "string",
+            "String" | "Keymap" => "string",
             _ => "integer",
         };
         let default = defaults

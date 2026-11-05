@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 mod cellops;
 mod completion;
+mod emacs;
 mod signature;
 
 use cellops::CellOp;
@@ -131,6 +132,8 @@ pub enum Action {
 }
 
 pub struct App {
+    pub keymap: crate::config::Keymap,
+    emacs: emacs::EmacsUi,
     pub notebook: Notebook,
     /// Empty for a scratchpad (`jotter` without a file); `:w name` names it.
     pub path: PathBuf,
@@ -338,6 +341,8 @@ impl App {
             })
             .unwrap_or_else(|| "python3".into());
         let mut app = Self {
+            keymap: crate::config::get().keymap,
+            emacs: emacs::EmacsUi::default(),
             notebook,
             path,
             selected: 0,
@@ -490,6 +495,7 @@ impl App {
 
     /// Replace the in-memory notebook with the on-disk state.
     fn reload(&mut self, rendered: &mut Rendered) -> Result<()> {
+        self.reset_emacs_input();
         self.notebook = Notebook::open(&self.path)?;
         rendered.rebuild_all(&self.notebook);
         if let Some(ed) = self.editor.take()
@@ -605,6 +611,9 @@ impl App {
                 MouseEventKind::ScrollDown => p.top += 3,
                 _ => {}
             }
+            return;
+        }
+        if self.emacs.search.is_some() {
             return;
         }
         if let Some(up) = &mut self.logs {
@@ -748,6 +757,12 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent, rendered: &mut Rendered) -> Action {
         let before = self.selected;
+        if self.prompt.is_none() {
+            self.emacs.prompt_cursor = None;
+        }
+        if self.stdin_req.is_none() {
+            self.emacs.stdin_cursor = None;
+        }
         let action = self.on_key_inner(key, rendered);
         if self.selected != before {
             self.follow = false; // manual movement ends run-all following
@@ -760,10 +775,22 @@ impl App {
     pub fn on_paste(&mut self, text: String, rendered: &mut Rendered) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         self.message = None;
-        if let Some(req) = &mut self.stdin_req {
-            req.buf.push_str(text.lines().next().unwrap_or(""));
+        if self.emacs.search.is_some() {
+            self.paste_isearch(&text);
+        } else if let Some(req) = &mut self.stdin_req {
+            let line = text.lines().next().unwrap_or("");
+            if self.keymap == crate::config::Keymap::Emacs {
+                emacs::insert_input(&mut req.buf, &mut self.emacs.stdin_cursor, line);
+            } else {
+                req.buf.push_str(line);
+            }
         } else if let Some(p) = &mut self.prompt {
-            p.buf.push_str(text.lines().next().unwrap_or(""));
+            let line = text.lines().next().unwrap_or("");
+            if self.keymap == crate::config::Keymap::Emacs {
+                emacs::insert_input(&mut p.buf, &mut self.emacs.prompt_cursor, line);
+            } else {
+                p.buf.push_str(line);
+            }
         } else if let Some(editor) = &mut self.editor {
             self.completion = None;
             if let Err(e) = editor.paste(&text) {
@@ -777,6 +804,11 @@ impl App {
     fn on_key_inner(&mut self, key: KeyEvent, rendered: &mut Rendered) -> Action {
         self.message = None;
         self.manual_scroll = false; // keyboard nav re-follows the selection
+        if self.emacs.search.is_some() {
+            self.on_key_isearch(key);
+            return Action::None;
+        }
+        let key = self.emacs_overlay_key(key);
         if let Some(up) = &mut self.logs {
             // scroll keys move through the log; anything else closes it
             // (draw clamps `up` to the entry count)
@@ -811,6 +843,9 @@ impl App {
             }
             return Action::None;
         }
+        if self.on_key_emacs_help(key) {
+            return Action::None;
+        }
         if self.show_help || self.debug.is_some() || self.zoom.is_some() {
             self.show_help = false;
             self.debug = None;
@@ -818,10 +853,16 @@ impl App {
             return Action::None;
         }
         if self.stdin_req.is_some() {
+            if self.on_key_emacs_stdin(key) {
+                return Action::None;
+            }
             self.on_key_stdin(key);
             return Action::None;
         }
         if self.prompt.is_some() {
+            if self.on_key_emacs_prompt(key) {
+                return Action::None;
+            }
             self.on_key_prompt(key, rendered);
             return Action::None;
         }
@@ -829,12 +870,24 @@ impl App {
             self.answer(confirm, key, rendered);
             return Action::None;
         }
+        if let Some(action) = self.on_key_emacs(key, rendered) {
+            return action;
+        }
         if self.editor.is_some() {
             self.on_key_edit(key, rendered);
             if self.editor.is_some() {
                 self.after_edit_key(key);
                 self.update_signature(key);
             }
+            return Action::None;
+        }
+        // Modified letters must never fall through as plain notebook commands.
+        if !crate::editor::plain(key)
+            && matches!(key.code, KeyCode::Char(_))
+            && !['o', 'i', 'r', 'g', 'c']
+                .iter()
+                .any(|&c| crate::editor::ctrl(key, c))
+        {
             return Action::None;
         }
         self.on_key_notebook(key, rendered)
@@ -1190,6 +1243,18 @@ impl App {
     }
 
     fn on_key_edit(&mut self, key: KeyEvent, rendered: &mut Rendered) {
+        // Popup commands can consume a key before it reaches the editor.
+        // They still end a run of ordinary Emacs typing for undo purposes.
+        if (self.completion.is_some() || matches!(key.code, KeyCode::Tab | KeyCode::BackTab))
+            && (!crate::editor::plain(key)
+                || !matches!(
+                    key.code,
+                    KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace
+                ))
+            && let Some(Backend::Builtin(e)) = &mut self.editor
+        {
+            e.break_emacs_group();
+        }
         if self.on_key_completion(key) {
             return;
         }
@@ -1278,7 +1343,7 @@ impl App {
         if let Some(force) = editor.take_write_request() {
             self.write_from_editor(source.clone(), force, rendered); // honor a final :wq
         }
-        self.editor = Some(Backend::Builtin(Editor::new(&source)));
+        self.editor = Some(self.builtin_backend(&source));
         self.message = Some(format!("nvim backend lost ({e:#}) — builtin editor"));
     }
 
@@ -1588,7 +1653,7 @@ impl App {
         };
         let source = cell.source.clone();
         let mut editor = self.make_backend(&source);
-        if insert {
+        if insert && !matches!(&editor, Backend::Builtin(e) if e.is_emacs()) {
             let _ = editor.input(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
         }
         self.editor = Some(editor);
@@ -1598,7 +1663,7 @@ impl App {
     /// with a status message, so editing always works.
     fn make_backend(&mut self, source: &str) -> Backend {
         if crate::config::get().editor != "nvim" {
-            return Backend::Builtin(Editor::new(source));
+            return self.builtin_backend(source);
         }
         let key = self.cell_key();
         let filetype = self.cell_filetype();
@@ -1625,7 +1690,7 @@ impl App {
             Ok(cell) => Backend::Nvim(cell),
             Err(e) => {
                 self.message = Some(format!("nvim unavailable ({e:#}) — builtin editor"));
-                Backend::Builtin(Editor::new(source))
+                self.builtin_backend(source)
             }
         }
     }
@@ -2000,6 +2065,7 @@ impl App {
                 prompt,
                 password,
             } => {
+                self.reset_emacs_input();
                 // overlays take keys first: close them so typing reaches the box
                 if self.zoom.take().is_some() {
                     self.message = None; // "zoom — any key closes"

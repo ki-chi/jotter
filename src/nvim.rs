@@ -81,6 +81,14 @@ impl Backend {
         }
     }
 
+    /// Emacs selection is half-open, unlike nvim's inclusive visual range.
+    pub fn region(&self) -> Option<std::ops::Range<usize>> {
+        match self {
+            Self::Builtin(e) => e.region(),
+            Self::Nvim(_) => None,
+        }
+    }
+
     pub fn is_builtin(&self) -> bool {
         matches!(self, Backend::Builtin(_))
     }

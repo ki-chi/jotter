@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+#[derive(Deserialize, Serialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Keymap {
+    #[default]
+    Vim,
+    Emacs,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -23,8 +31,10 @@ pub struct Config {
     ///
     /// On a light terminal background, use `base16-ocean.light`, `InspiredGitHub` or `Solarized (light)`. See them all in the [theme gallery](/jotter/reference/themes/).
     pub theme: String,
-    /// The cell editor: `"builtin"`, jOtter's own vim-style editor, or `"nvim"`, an embedded Neovim with your config and plugins that gives you the full Neovim editing model. The Neovim backend is experimental; see [embedded Neovim](/jotter/guides/neovim/). If Neovim is missing or crashes, jOtter falls back to the builtin editor.
+    /// The cell editor: `"builtin"`, jOtter's own editor using the selected `keymap`, or `"nvim"`, an embedded Neovim with your config and plugins that gives you the full Neovim editing model. The Neovim backend is experimental; see [embedded Neovim](/jotter/guides/neovim/). If Neovim is missing or crashes, jOtter falls back to the builtin editor.
     pub editor: String,
+    /// Keyboard bindings: `"vim"` (default) or `"emacs"`. Emacs adds application shortcuts such as `Ctrl+x Ctrl+s` and non-modal editing in the builtin editor. Existing notebook cell shortcuts remain available. With `editor = "nvim"`, application shortcuts still apply; Neovim owns cell editing. See [editing](/jotter/guides/editing/#emacs-keymap).
+    pub keymap: Keymap,
     /// With `editor = "nvim"`: load your Neovim config and plugins. jOtter sets `g:jotter = 1` before your config runs, so you can skip plugins that make no sense inside a cell. Set to `false` for a clean Neovim (`-u NONE`).
     pub nvim_user_config: bool,
     /// Python kernels: use IPython's Jedi completer for every completion. Jedi completes names from code that hasn't run yet, but is slow. When `false`, jOtter uses IPython's fast completer and asks Jedi only when the fast one finds nothing; see [completion](/jotter/guides/completion/#where-completions-come-from-python).
@@ -50,6 +60,7 @@ impl Default for Config {
             autosave_secs: 30,
             theme: "base16-ocean.dark".into(),
             editor: "builtin".into(),
+            keymap: Keymap::default(),
             nvim_user_config: true,
             jedi: false,
             complete_on_dot: true,
@@ -106,5 +117,18 @@ mod tests {
         assert_eq!(c.max_output_rows, 30);
         assert_eq!(c.max_image_rows, 18); // default kept
         assert!(toml::from_str::<Config>("max_outpt_rows = 30").is_err()); // typo caught
+    }
+
+    #[test]
+    fn keymap_is_optional_validated_and_independent_of_backend() {
+        assert_eq!(toml::from_str::<Config>("").unwrap().keymap, Keymap::Vim);
+        for backend in ["builtin", "nvim"] {
+            let c: Config =
+                toml::from_str(&format!("keymap = 'emacs'\neditor = '{backend}'")).unwrap();
+            assert_eq!(c.keymap, Keymap::Emacs);
+            assert_eq!(c.editor, backend);
+            assert!(toml::to_string(&c).unwrap().contains("keymap = \"emacs\""));
+        }
+        assert!(toml::from_str::<Config>("keymap = 'emcas'").is_err());
     }
 }

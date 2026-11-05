@@ -1,9 +1,13 @@
-//! Minimal modal (vi) cell editor over a Vec<String> buffer.
+//! Builtin cell editor over a Vec<String> buffer, with Vim or Emacs bindings.
 //! Covers the everyday subset; `E` opens the cell in $EDITOR for anything more.
 //! ponytail: no operator+motion combos (dw, ci"), no visual mode, no counts —
 //! the nvim escape hatch is the upgrade path.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+mod emacs;
+use emacs::EmacsState;
+pub use emacs::{KillBuffer, alt, ctrl, plain};
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Mode {
@@ -30,6 +34,7 @@ pub struct Editor {
     pending: Option<char>,
     undo: Vec<(Vec<String>, (usize, usize))>,
     redo: Vec<(Vec<String>, (usize, usize))>,
+    emacs: Option<EmacsState>,
 }
 
 fn bidx(s: &str, ci: usize) -> usize {
@@ -52,6 +57,7 @@ impl Editor {
             pending: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            emacs: None,
         }
     }
 
@@ -69,6 +75,7 @@ impl Editor {
 
     /// Mouse click: place the cursor; optionally switch to insert (double click).
     pub fn click(&mut self, row: usize, col: usize, insert: bool) {
+        self.break_emacs_group();
         if insert && self.mode == Mode::Normal {
             self.snapshot();
             self.mode = Mode::Insert;
@@ -132,6 +139,7 @@ impl Editor {
     }
 
     fn snapshot(&mut self) {
+        self.break_emacs_group();
         self.undo.push((self.lines.clone(), self.cursor));
         if self.undo.len() > 100 {
             self.undo.remove(0);
@@ -149,6 +157,9 @@ impl Editor {
             return Outcome::Run {
                 advance: key.modifiers.contains(KeyModifiers::SHIFT),
             };
+        }
+        if self.emacs.is_some() {
+            return self.input_emacs(key);
         }
         match self.mode {
             Mode::Insert => self.input_insert(key),
@@ -188,7 +199,7 @@ impl Editor {
                 self.lines[row].insert_str(b, "    ");
                 self.cursor.1 += 4;
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if plain(key) => {
                 let b = bidx(&self.lines[row], col);
                 self.lines[row].insert(b, c);
                 self.cursor.1 += 1;

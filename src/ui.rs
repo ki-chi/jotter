@@ -1714,6 +1714,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, rendered: &mut Rendered) {
                     }
                 }
             }
+            if let Some(region) = ed.region() {
+                overlay_region(&mut logical, region);
+            }
             wrap_lines(&logical, body.width.saturating_sub(GUTTER).max(1))
         }
         _ => Wrapped::default(),
@@ -2020,6 +2023,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, rendered: &mut Rendered) {
     let (mode_label, mode_bg) = match app.editor.as_ref().map(|e| e.mode()) {
         None if app.visual.is_some() => (" V-LINE ", VISUAL_COLOR),
         None => (" VIEW ", Color::Cyan),
+        Some(ModeKind::Insert) if matches!(&app.editor, Some(crate::nvim::Backend::Builtin(e)) if e.is_emacs()) => {
+            (" EMACS ", Color::Green)
+        }
         Some(ModeKind::Insert) => (" INSERT ", Color::Green),
         Some(ModeKind::Visual) => (" VISUAL ", Color::Magenta),
         Some(ModeKind::VisualLine) => (" V-LINE ", Color::Magenta),
@@ -2040,11 +2046,17 @@ pub fn draw(frame: &mut Frame, app: &mut App, rendered: &mut Rendered) {
     // the message
     // (the `:` command line has its own popup, see draw_cmdline)
     let prompt = app.prompt.as_ref().and_then(|p| match p.kind {
-        crate::app::PromptKind::Search => Some(format!("/{}▏", p.buf)),
-        crate::app::PromptKind::SaveAs => Some(format!("save as: {}▏", p.buf)),
+        crate::app::PromptKind::Search => {
+            Some(format!("/{}", app.input_with_cursor(&p.buf, false)))
+        }
+        crate::app::PromptKind::SaveAs => {
+            Some(format!("save as: {}", app.input_with_cursor(&p.buf, false)))
+        }
         crate::app::PromptKind::Command => None,
     });
-    let tail = if let Some(p) = prompt {
+    let tail = if let Some(state) = app.emacs_status() {
+        state
+    } else if let Some(p) = prompt {
         p
     } else if let Some(c) = app
         .editor
@@ -2058,8 +2070,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, rendered: &mut Rendered) {
     } else {
         app.message.clone().unwrap_or_default()
     };
-    // a pending question takes the whole line, so its choices always fit
-    let status_line = if app.confirm.is_some() {
+    // Questions and Emacs input states take priority over a potentially long path.
+    let status_line = if app.confirm.is_some() || app.emacs_status().is_some() {
         Line::from(vec![
             Span::styled(
                 mode_label,
@@ -2080,7 +2092,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, rendered: &mut Rendered) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                " {}{}  cell {}/{}  ",
+                " {}{}{}  cell {}/{}  ",
+                if app.keymap == crate::config::Keymap::Emacs {
+                    "[emacs] "
+                } else {
+                    ""
+                },
                 if app.is_scratch() {
                     "[scratch]".into()
                 } else {
@@ -2159,7 +2176,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, rendered: &mut Rendered) {
         );
     }
     if app.show_help {
-        draw_help(frame);
+        draw_help_for_keymap(frame, app.keymap, app.emacs_help_top());
     }
     if let Some(up) = &mut app.logs {
         draw_logs(frame, up);
@@ -2173,20 +2190,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, rendered: &mut Rendered) {
     if let Some(p) = &app.prompt
         && p.kind == crate::app::PromptKind::Command
     {
-        draw_cmdline(frame, &p.buf);
+        draw_cmdline(frame, &p.buf, app.input_cursor(false));
     } else if let Some(c) = app
         .editor
         .as_ref()
         .and_then(|e| e.cmdline())
         .and_then(|c| c.strip_prefix(':'))
     {
-        draw_cmdline(frame, c); // nvim's own `:` line, same look
+        draw_cmdline(frame, c, None); // nvim's own `:` line, same look
     }
     if let Some(side) = side {
         draw_marks(frame, side, app, &marks);
     }
     if let Some(req) = &app.stdin_req {
-        draw_stdin(frame, req);
+        draw_stdin(frame, req, app.input_cursor(true));
     }
 }
 
@@ -2248,9 +2265,24 @@ fn draw_marks(frame: &mut Frame, area: Rect, app: &App, marks: &[(usize, char)])
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The `:` command line: a rounded box in the accent colour a quarter of
-/// the way down, titled and prompted like noice.nvim's cmdline popup.
-fn draw_cmdline(frame: &mut Frame, text: &str) {
+/// Scroll input so point remains visible, measuring terminal columns, not chars.
+fn input_window(text: &str, cursor: Option<usize>, room: usize) -> (String, u16) {
+    let point = cursor.unwrap_or_else(|| text.chars().count());
+    let before: String = text.chars().take(point).collect();
+    let mut skip = 0;
+    let mut width = before.width();
+    for c in before.chars() {
+        if width <= room {
+            break;
+        }
+        width = width.saturating_sub(unicode_width::UnicodeWidthChar::width(c).unwrap_or(0));
+        skip += 1;
+    }
+    (text.chars().skip(skip).collect(), width as u16)
+}
+
+/// The `:` command line, with a cursor that can move through the input.
+fn draw_cmdline(frame: &mut Frame, text: &str, cursor: Option<usize>) {
     use ratatui::widgets::{Block, BorderType, Clear, Padding};
     let area = frame.area();
     let mut rect = centered(area, area.width.saturating_sub(6).clamp(26, 72), 3);
@@ -2266,9 +2298,8 @@ fn draw_cmdline(frame: &mut Frame, text: &str) {
     frame.render_widget(block, rect);
     // keep the tail (and the cursor) inside the box when the line outgrows it
     let room = (inner.width as usize).saturating_sub(3);
-    let skip = text.chars().count().saturating_sub(room);
-    let tail: String = text.chars().skip(skip).collect();
-    frame.set_cursor_position((inner.x + 2 + tail.width() as u16, inner.y));
+    let (tail, x) = input_window(text, cursor, room);
+    frame.set_cursor_position((inner.x + 2 + x, inner.y));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("› ", accent),
@@ -2308,6 +2339,28 @@ fn sel_range(
             if row == hi.0 { hi.1 } else { eol },
         )),
         _ => None,
+    }
+}
+
+/// Emacs regions exclude point; offsets count Unicode scalar values and newlines.
+fn overlay_region(lines: &mut [Line<'static>], region: std::ops::Range<usize>) {
+    let mut offset = 0;
+    for line in lines {
+        let len = line_chars(line);
+        let start = region.start.max(offset);
+        let end = region.end.min(offset + len + 1);
+        if start < end {
+            if start < offset + len {
+                overlay_reversed(line, start - offset, end.min(offset + len) - offset - 1);
+            }
+            if end > offset + len {
+                line.spans.push(Span::styled(
+                    " ",
+                    Style::new().add_modifier(Modifier::REVERSED),
+                ));
+            }
+        }
+        offset += len + 1;
     }
 }
 
@@ -2387,7 +2440,7 @@ fn centered(outer: Rect, w: u16, h: u16) -> Rect {
 }
 
 /// Kernel `input()`: a centered modal prompt (all keys already route to it).
-fn draw_stdin(frame: &mut Frame, req: &crate::app::StdinReq) {
+fn draw_stdin(frame: &mut Frame, req: &crate::app::StdinReq, cursor: Option<usize>) {
     let area = frame.area();
     let width = area.width.saturating_sub(6).clamp(26, 72);
     let title = match req.prompt.trim() {
@@ -2406,12 +2459,8 @@ fn draw_stdin(frame: &mut Frame, req: &crate::app::StdinReq) {
         req.buf.clone()
     };
     // keep the tail (and the cursor) inside the box when the input outgrows it
-    let skip = shown
-        .chars()
-        .count()
-        .saturating_sub((inner.width as usize).saturating_sub(1));
-    let tail: String = shown.chars().skip(skip).collect();
-    frame.set_cursor_position((inner.x + tail.chars().count() as u16, inner.y));
+    let (tail, x) = input_window(&shown, cursor, (inner.width as usize).saturating_sub(1));
+    frame.set_cursor_position((inner.x + x, inner.y));
     frame.render_widget(Paragraph::new(tail), inner);
 }
 
@@ -2894,6 +2943,77 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+pub const EMACS_HELP: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Application (Emacs)",
+        &[
+            ("C-x (then) C-s", "save; keep editing"),
+            ("C-x (then) C-c", "quit (asks if unsaved)"),
+            ("C-x (then) C-w", "save as"),
+            ("C-g", "cancel selection / popup / prefix"),
+            ("C-h (then) ?", "help (notebook mode)"),
+            ("C-s C-r", "incremental search forward / backward"),
+            ("Enter C-g", "search: accept / cancel (restore position)"),
+        ],
+    ),
+    (
+        "Notebook (existing cell keys remain)",
+        &[
+            ("C-n C-p", "next / previous cell (also j k, arrows)"),
+            ("M-< M->", "first / last cell (also gg G)"),
+            ("Enter i A", "edit cell / at start / at end"),
+            ("C-x (then) C-e", "edit cell in $EDITOR (replaces C-g)"),
+            ("a b dd yy p P", "add after / before; delete / copy / paste"),
+            ("V J K M", "select cells / move down / up / merge"),
+            ("t f F", "cycle type / format cell / format all"),
+            ("w W S q :", "save / force save / save as / quit / commands"),
+            ("?", "this help"),
+        ],
+    ),
+    (
+        "Builtin Emacs editor",
+        &[
+            (
+                "C-b C-f C-p C-n",
+                "character backward / forward; line up / down",
+            ),
+            (
+                "C-a C-e M-b M-f",
+                "line start / end; word backward / forward",
+            ),
+            ("M-< M->", "cell start / end"),
+            ("C-d Backspace", "delete next / previous character"),
+            ("M-d M-Backspace", "kill next / previous word"),
+            ("C-k C-y", "kill to end of line / yank killed text"),
+            ("C-Space C-@", "set mark (also terminal NUL)"),
+            ("C-w M-w", "kill / copy region (point excluded)"),
+            ("C-/ C-_", "undo (also notebook cell undo)"),
+            ("C-x (then) u", "undo"),
+            ("M-_", "redo (replaces notebook C-r)"),
+            ("Esc", "keep changes and leave cell"),
+        ],
+    ),
+    (
+        "Run, completion and outputs",
+        &[
+            ("Shift+Enter r", "run + advance (r: notebook only)"),
+            ("Ctrl+Enter Space", "run in place (Space: notebook only)"),
+            (
+                "X < > C-c R",
+                "run all / above / below; interrupt / restart",
+            ),
+            ("Tab Shift+Tab", "completion / docs"),
+            (
+                "C-n C-p Enter",
+                "completion popup: next / previous / accept",
+            ),
+            ("Ctrl+\\", "split cell at cursor"),
+            ("o c C [ ]", "toggle / clear output / all; scroll output"),
+            ("zi Z L D", "zoom / native image size / logs / debug"),
+        ],
+    ),
+];
+
 /// Width of the key column: the longest chord list.
 const HELP_KEY_W: usize = 17;
 
@@ -2923,8 +3043,18 @@ fn help_section(title: &str, rows: &[(&str, &str)]) -> Vec<Line<'static>> {
     lines
 }
 
+#[cfg(test)]
 fn draw_help(frame: &mut Frame) {
-    let sections: Vec<Vec<Line>> = HELP.iter().map(|(t, r)| help_section(t, r)).collect();
+    draw_help_for_keymap(frame, crate::config::Keymap::Vim, 0);
+}
+
+fn draw_help_for_keymap(frame: &mut Frame, keymap: crate::config::Keymap, top: usize) {
+    let help = if keymap == crate::config::Keymap::Emacs {
+        EMACS_HELP
+    } else {
+        HELP
+    };
+    let sections: Vec<Vec<Line>> = help.iter().map(|(t, r)| help_section(t, r)).collect();
     let col_w = sections
         .iter()
         .flatten()
@@ -2955,8 +3085,15 @@ fn draw_help(frame: &mut Frame) {
         frame,
         centered(area, width + 4, height + 2),
         "jOtter 🦦 keys",
-        "any key closes",
+        if keymap == crate::config::Keymap::Emacs {
+            "C-n/p scroll · C-g closes"
+        } else {
+            "any key closes"
+        },
     );
+    let top = top
+        .min((height as usize).saturating_sub(inner.height as usize))
+        .min(u16::MAX as usize) as u16;
     if two {
         let [l, _, r] = Layout::horizontal([
             Constraint::Length(col_w),
@@ -2964,10 +3101,10 @@ fn draw_help(frame: &mut Frame) {
             Constraint::Length(col_w),
         ])
         .areas(inner);
-        frame.render_widget(Paragraph::new(left), l);
-        frame.render_widget(Paragraph::new(right), r);
+        frame.render_widget(Paragraph::new(left).scroll((top, 0)), l);
+        frame.render_widget(Paragraph::new(right).scroll((top, 0)), r);
     } else {
-        frame.render_widget(Paragraph::new(left), inner);
+        frame.render_widget(Paragraph::new(left).scroll((top, 0)), inner);
     }
 }
 
@@ -3526,6 +3663,72 @@ mod tests {
             let after = r.split('│').nth(1).unwrap_or("");
             assert!(after.starts_with(' '), "unpadded row: {r:?}");
         }
+    }
+
+    #[test]
+    fn emacs_region_excludes_point_and_marks_selected_newlines() {
+        let mut lines = vec![Line::raw("日本"), Line::raw(""), Line::raw("語a")];
+        overlay_region(&mut lines, 1..5);
+        let reversed = |line: &Line| -> String {
+            line.spans
+                .iter()
+                .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        assert_eq!(reversed(&lines[0]), "本 ");
+        assert_eq!(reversed(&lines[1]), " ");
+        assert_eq!(reversed(&lines[2]), "語");
+        assert!(
+            !lines[2]
+                .spans
+                .last()
+                .unwrap()
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn input_window_keeps_unicode_cursor_visible_and_emacs_help_can_scroll() {
+        assert_eq!(input_window("日本abc", Some(1), 3), ("日本abc".into(), 2));
+        assert_eq!(input_window("日本abc", None, 3), ("abc".into(), 3));
+        assert_eq!(input_window("日本abc", Some(2), 3), ("本abc".into(), 2));
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        t.draw(|f| draw_help_for_keymap(f, crate::config::Keymap::Emacs, 0))
+            .unwrap();
+        let first = buffer_rows(&t).join("\n");
+        assert!(first.contains("Application (Emacs)"));
+        assert!(first.contains("C-n/p scroll"));
+        t.draw(|f| draw_help_for_keymap(f, crate::config::Keymap::Emacs, usize::MAX))
+            .unwrap();
+        assert!(buffer_rows(&t).join("\n").contains("split cell at cursor"));
+    }
+
+    #[test]
+    fn emacs_input_status_stays_visible_with_a_long_notebook_path() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::open(std::path::PathBuf::new(), None, tx).unwrap();
+        let mut r = Rendered::build(&app.notebook, None, Default::default());
+        app.keymap = crate::config::Keymap::Emacs;
+        app.path = std::path::PathBuf::from(format!("/{}/nb.ipynb", "long/".repeat(30)));
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| draw(f, &mut app, &mut r)).unwrap();
+        assert!(buffer_rows(&t)[23].contains("[emacs]"));
+        let ctrl = |c| {
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::CONTROL,
+            )
+        };
+        app.on_key(ctrl('x'), &mut r);
+        t.draw(|f| draw(f, &mut app, &mut r)).unwrap();
+        assert!(buffer_rows(&t)[23].contains("C-x"));
+        app.on_key(ctrl('g'), &mut r);
+        app.on_key(ctrl('s'), &mut r);
+        t.draw(|f| draw(f, &mut app, &mut r)).unwrap();
+        assert!(buffer_rows(&t)[23].contains("I-search"));
     }
 
     #[test]
