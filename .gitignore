@@ -7,3 +7,4 @@
 .claude/settings.local.json
 .claude/hooks/
 __pycache__/
+/plans/
