@@ -1,6 +1,6 @@
 ---
 title: "Editing cells"
-description: "The modal cell editor: notebook mode, edit mode, and the vim keys the builtin editor understands."
+description: "Edit cells with Vim or Emacs keys, or use an embedded Neovim."
 ---
 
 import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -8,7 +8,7 @@ import Clip from '../../../components/Clip.astro';
 
 <Clip name="editing" caption="Editing a cell with vim motions" />
 
-jOtter is modal, like vim. **Notebook mode** works on whole cells: selecting, running, adding, deleting. **Edit mode** works on the text inside one cell, with its own vim-style normal and insert modes. The [status line](/jotter/guides/running-code/#status-line) shows the mode (`VIEW` in notebook mode), and the cursor shape changes with it: a block in normal mode, a bar in insert mode.
+By default, jOtter is modal, like vim. **Notebook mode** works on whole cells: selecting, running, adding, deleting. **Edit mode** works on the text inside one cell, with its own vim-style normal and insert modes. The [status line](/jotter/guides/running-code/#status-line) shows the mode (`VIEW` in notebook mode), and the cursor shape changes with it: a block in normal mode, a bar in insert mode.
 
 ## Entering and leaving a cell
 
@@ -46,6 +46,46 @@ The builtin editor deliberately stops there: no counts, no text objects, no visu
 
 - Set `editor = "nvim"` and an [embedded Neovim](/jotter/guides/neovim/) handles all cell editing, with your own config.
 - Press <kbd>Ctrl</kbd>+<kbd>g</kbd> in notebook mode to edit the cell in [your `$EDITOR`](/jotter/guides/external-editor/).
+
+## Emacs keymap
+
+Set this in `~/.config/jotter/config.toml` (or `$XDG_CONFIG_HOME/jotter/config.toml`) and restart jOtter:
+
+```toml
+keymap = "emacs"
+```
+
+Notebook mode still works on whole cells. Existing cell shortcuts such as `a`, `b`, `dd`, `r` and `Space` remain available. `C-n` / `C-p` also select the next / previous cell, and `M-<` / `M->` select the first / last one.
+
+With the builtin editor, Enter opens a cell ready for typing: there is no normal / insert mode distinction. `i` and `:` insert those characters. Esc keeps your changes and returns to notebook mode. `C-g` cancels a selection, popup, search or unfinished key sequence and keeps the cell open.
+
+Here `C-` means Ctrl and `M-` means Alt. A sequence such as `C-x C-s` means Ctrl+x followed by Ctrl+s.
+
+| Keys | Action |
+| --- | --- |
+| `C-x C-s`, `C-x C-w`, `C-x C-c` | Save, save as, quit (with the existing unsaved-change confirmation) |
+| `C-b`, `C-f`, `C-p`, `C-n` | Move backward / forward a character, up / down a logical line |
+| `C-a`, `C-e`, `M-b`, `M-f` | Line start / end, previous / next word |
+| `M-<`, `M->` | Cell start / end |
+| `C-d`, Backspace | Delete next / previous character |
+| `M-d`, `M-Backspace`, `C-k` | Kill next / previous word, or to the line end |
+| `C-Space` (also `C-@`), `C-w`, `M-w` | Set mark, kill region, copy region |
+| `C-y` | Yank the last killed or copied text, including across cells |
+| `C-/`, `C-_`, `C-x u` | Undo (also cell operations in notebook mode) |
+| `M-_` | Redo |
+| `C-s`, `C-r` | Incremental search forward / backward |
+
+The region runs between mark and point, excluding point. Typing clears the active region and inserts at point. Consecutive kills accumulate in a single buffer; there is no kill-ring cycling. `C-k` at the end of a line kills its newline. Ordinary consecutive typing shares one undo step; moving the cursor starts a new step. Pasting and accepting a completion each make one undo step.
+
+Search applies to the current cell while editing, and all cell sources in notebook mode. It is literal and case-sensitive. Type to refine it, use `C-s` / `C-r` for the next / previous match (wrapping at the ends), Backspace to revise, and Enter to accept. `C-g` or Esc cancels and restores your starting position.
+
+Tab completion, `C-n` / `C-p` in the completion popup, Shift+Tab documentation, cell splitting and Shift/Ctrl+Enter execution still work. Application input prompts support `C-a`, `C-e`, `C-b`, `C-f` and `C-d`, with paste inserting at the cursor.
+
+Two existing notebook bindings change: `C-g` cancels, so use `C-x C-e` for the external editor; `C-r` searches, so use `M-_` for redo. `C-c` still interrupts the kernel in notebook mode. Press `C-h ?` or `?` there for the Emacs help; scroll it with `C-n` / `C-p` or PageUp / PageDown. See [Keybindings](/jotter/reference/keybindings/#emacs-keymap) for the full list.
+
+With `editor = "nvim"`, application shortcuts still apply, but Neovim keeps its own cell-editing keys, search, undo and `C-g`. Configure those in Neovim. If Neovim fails, the fallback builtin editor uses Emacs keys.
+
+Your terminal must send Alt-modified keys for `M-` bindings. Esc followed by a character is not interpreted as Meta: Esc leaves the cell. Terminals may report `C-Space` as `C-@` or NUL; all three are accepted. `C-x u` is an undo alternative when `C-/` or `C-_` is unavailable. The default remains `keymap = "vim"`.
 
 ## Formatting
 
