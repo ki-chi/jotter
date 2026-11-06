@@ -307,6 +307,29 @@ fn on_term_event(app: &mut App, rendered: &mut Rendered, event: Event) -> Action
     Action::None
 }
 
+/// Split editor commands with shell-style quoting, then append the file as
+/// one argument. No shell evaluation or expansion is involved.
+fn external_editor_command(
+    editor: &str,
+    file: &std::path::Path,
+) -> std::io::Result<std::process::Command> {
+    let words = shlex::split(editor).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid editor command: unmatched quote or trailing escape",
+        )
+    })?;
+    let (program, args) = words
+        .split_first()
+        .filter(|(program, _)| !program.is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "editor command is empty")
+        })?;
+    let mut command = std::process::Command::new(program);
+    command.args(args).arg(file);
+    Ok(command)
+}
+
 /// Suspend the TUI, open the selected cell in $VISUAL/$EDITOR, read it back.
 fn external_edit(
     terminal: &mut ratatui::DefaultTerminal,
@@ -322,11 +345,18 @@ fn external_edit(
     let editor_cmd = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".into());
+    let mut command = match external_editor_command(&editor_cmd, &tmp) {
+        Ok(command) => command,
+        Err(e) => {
+            app.message = Some(format!("{editor_cmd} failed: {e}"));
+            return;
+        }
+    };
 
     let result = std::fs::write(&tmp, &cell.source).and_then(|()| {
         leave_extras(enhanced);
         ratatui::restore();
-        let status = std::process::Command::new(&editor_cmd).arg(&tmp).status();
+        let status = command.status();
         *terminal = ratatui::init();
         clear_screen(); // the editor's screen is not ours to diff against
         enter_extras(enhanced);
@@ -346,6 +376,93 @@ fn external_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_commands_support_arguments_quotes_and_escaped_spaces() {
+        let file = std::path::Path::new("/tmp/cell source; $(literal).py");
+        let cases = [
+            ("vi", "vi", vec![]),
+            ("emacs -nw -Q", "emacs", vec!["-nw", "-Q"]),
+            ("code --wait", "code", vec!["--wait"]),
+            (
+                r#""/Applications/My Editor/bin/editor" --wait"#,
+                "/Applications/My Editor/bin/editor",
+                vec!["--wait"],
+            ),
+            (
+                r"/tmp/my\ editor --label hello\ world",
+                "/tmp/my editor",
+                vec!["--label", "hello world"],
+            ),
+            (
+                r#"emacs --eval '(message "hello world")' ''"#,
+                "emacs",
+                vec!["--eval", "(message \"hello world\")", ""],
+            ),
+        ];
+        for (input, program, args) in cases {
+            let command = external_editor_command(input, file).unwrap();
+            assert_eq!(command.get_program(), program, "{input}");
+            let expected: Vec<_> = args
+                .iter()
+                .map(std::ffi::OsStr::new)
+                .chain(std::iter::once(file.as_os_str()))
+                .collect();
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn editor_commands_reject_empty_programs_and_malformed_quoting() {
+        for input in [
+            "",
+            " \t\n",
+            "''",
+            "\"\" --wait",
+            "emacs '",
+            "emacs \"",
+            "emacs \\",
+        ] {
+            let error =
+                external_editor_command(input, std::path::Path::new("cell.py")).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn external_editor_receives_literal_arguments_and_edits_the_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("jotter-editor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let editor = dir.join("editor with spaces");
+        let file = dir.join("cell with spaces.py");
+        let captured = dir.join("arguments");
+        let sentinel = dir.join("must-not-exist");
+        std::fs::write(
+            &editor,
+            "#!/bin/sh\n[ \"$#\" -eq 4 ] || exit 2\nprintf '%s\\000' \"$@\" > \"$JOTTER_TEST_ARGS\"\nprintf 'edited\\n' > \"$4\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&file, "original\n").unwrap();
+        let literal = format!("$(touch {}) $HOME *.py ; |", sentinel.display());
+        let input = format!("'{}' -nw -Q '{literal}'", editor.display());
+        let status = external_editor_command(&input, &file)
+            .unwrap()
+            .env("JOTTER_TEST_ARGS", &captured)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let expected = format!("-nw\0-Q\0{literal}\0{}\0", file.display());
+        assert_eq!(std::fs::read(&captured).unwrap(), expected.as_bytes());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited\n");
+        assert!(
+            !sentinel.exists(),
+            "editor arguments must not be evaluated by a shell"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// Queued updates of one display collapse to the latest; everything
     /// else keeps its order.

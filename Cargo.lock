@@ -1440,6 +1440,7 @@ dependencies = [
  "rmpv",
  "serde",
  "serde_json",
+ "shlex",
  "syntect",
  "tokio",
  "toml",

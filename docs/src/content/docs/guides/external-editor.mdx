@@ -16,6 +16,16 @@ The editor is `$VISUAL`, then `$EDITOR`, then `vi`:
 EDITOR=hx jotter notebook.ipynb
 ```
 
+Arguments are supported, including quoted arguments and executable paths containing spaces:
+
+```sh
+VISUAL='emacs -nw -Q' jotter notebook.ipynb
+VISUAL='code --wait' jotter notebook.ipynb
+VISUAL='"/path/to/My Editor" --wait' jotter notebook.ipynb
+```
+
+The command uses shell-style quoting and escaping to separate arguments. The cell's temporary file is appended as one argument. Shell expansions, pipelines and redirections are not evaluated. An empty command or an unmatched quote produces an error inside jOtter.
+
 The cell is written to a temporary file whose extension matches the cell's language (`.py`, `.jl`, `.md`, …), so your editor's syntax highlighting, language server and formatter all apply.
 
 - If the editor exits with an error (in vim: `:cq`), the cell is left unchanged.
